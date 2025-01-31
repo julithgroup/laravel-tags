@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Collection as DbCollection;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Spatie\EloquentSortable\Sortable;
 use Spatie\EloquentSortable\SortableTrait;
 use Spatie\Translatable\HasTranslations;
@@ -20,10 +21,9 @@ class Tag extends Model implements Sortable
     use HasFactory;
 
     public array $translatable = ['name', 'slug'];
-
     public $guarded = [];
 
-    public static function getLocale()
+    public static function getLocale(): string
     {
         return app()->getLocale();
     }
@@ -40,8 +40,28 @@ class Tag extends Model implements Sortable
     public function scopeContaining(Builder $query, string $name, $locale = null): Builder
     {
         $locale = $locale ?? static::getLocale();
+        
+        return match (DB::getDriverName()) {
+            'pgsql' => $query->whereRaw(
+                'lower(' . $this->getQuery()->getGrammar()->wrap("name->{$locale}") . ')::text like ?',
+                ['%' . mb_strtolower($name) . '%']
+            ),
+            default => $query->whereRaw(
+                'lower(json_unquote(json_extract(' . $this->getQuery()->getGrammar()->wrap('name') . ', \'$."' . $locale . '"\''.'))) like ?',
+                ['%' . mb_strtolower($name) . '%']
+            )
+        };
+    }
 
-        return $query->whereRaw('lower(' . $this->getQuery()->getGrammar()->wrap('name->' . $locale) . ') like ?', ['%' . mb_strtolower($name) . '%']);
+    protected function buildJsonWhereClause(Builder $query, string $column, string $locale, string $value): Builder
+    {
+        return match (DB::getDriverName()) {
+            'pgsql' => $query->where("{$column}->{$locale}", $value),
+            default => $query->whereRaw(
+                "json_unquote(json_extract({$column}, '$.\"" . $locale . "\"')) = ?",
+                [$value]
+            )
+        };
     }
 
     public static function findOrCreate(
@@ -53,7 +73,6 @@ class Tag extends Model implements Sortable
             if ($value instanceof self) {
                 return $value;
             }
-
             return static::findOrCreateFromString($value, $type, $locale);
         });
 
@@ -68,12 +87,15 @@ class Tag extends Model implements Sortable
     public static function findFromString(string $name, ?string $type = null, ?string $locale = null)
     {
         $locale = $locale ?? static::getLocale();
-
+        
         return static::query()
             ->where('type', $type)
             ->where(function ($query) use ($name, $locale) {
-                $query->where("name->{$locale}", $name)
-                    ->orWhere("slug->{$locale}", $name);
+                $instance = new static;
+                $instance->buildJsonWhereClause($query, 'name', $locale, $name)
+                    ->orWhere(function ($query) use ($instance, $name, $locale) {
+                        $instance->buildJsonWhereClause($query, 'slug', $locale, $name);
+                    });
             })
             ->first();
     }
@@ -81,10 +103,15 @@ class Tag extends Model implements Sortable
     public static function findFromStringOfAnyType(string $name, ?string $locale = null)
     {
         $locale = $locale ?? static::getLocale();
+        $instance = new static;
 
         return static::query()
-            ->where("name->{$locale}", $name)
-            ->orWhere("slug->{$locale}", $name)
+            ->where(function ($query) use ($instance, $name, $locale) {
+                $instance->buildJsonWhereClause($query, 'name', $locale, $name)
+                    ->orWhere(function ($query) use ($instance, $name, $locale) {
+                        $instance->buildJsonWhereClause($query, 'slug', $locale, $name);
+                    });
+            })
             ->get();
     }
 
