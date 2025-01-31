@@ -86,8 +86,8 @@ class Tag extends Model implements Sortable
     {
         if (DB::getDriverName() === 'pgsql') {
             $query->whereRaw(
-                "{$field}->'" . $locale . "' = ?::jsonb",
-                [$value]
+                "({$field}->?)::jsonb = to_jsonb(?::text)",
+                [$locale, $value]
             );
         } else {
             $query->whereRaw(
