@@ -24,7 +24,7 @@ class Tag extends Model implements Sortable
 
     public array $translatable = ['name', 'slug'];
     public $guarded = [];
-    
+
     protected $casts = [
         'name' => 'json',
         'slug' => 'json',
@@ -47,18 +47,18 @@ class Tag extends Model implements Sortable
     public function scopeContaining(Builder $query, string $name, $locale = null): Builder
     {
         $locale = $locale ?? static::getLocale();
-        
+        $searchName = '%' . mb_strtolower($name) . '%';
+
         if (DB::getDriverName() === 'pgsql') {
             return $query->whereRaw(
-                "name->'" . $locale . "' ? '" . mb_strtolower($name) . "'",
-                [],
-                'and'
+                "lower(name->>'$locale') like ?",
+                [$searchName]
             );
         }
-        
+
         return $query->whereRaw(
             'lower(json_unquote(json_extract(name, \'$."' . $locale . '"\''.'))) like ?',
-            ['%' . mb_strtolower($name) . '%']
+            [$searchName]
         );
     }
 
@@ -71,6 +71,7 @@ class Tag extends Model implements Sortable
             if ($value instanceof self) {
                 return $value;
             }
+
             return static::findOrCreateFromString($value, $type, $locale);
         });
 
@@ -86,8 +87,8 @@ class Tag extends Model implements Sortable
     {
         if (DB::getDriverName() === 'pgsql') {
             $query->whereRaw(
-                "({$field}->?)::jsonb = to_jsonb(?::text)",
-                [$locale, $value]
+                "{$field}->>" . "'$locale' = ?",
+                [$value]
             );
         } else {
             $query->whereRaw(
@@ -100,7 +101,7 @@ class Tag extends Model implements Sortable
     public static function findFromString(string $name, ?string $type = null, ?string $locale = null)
     {
         $locale = $locale ?? static::getLocale();
-        
+
         return static::query()
             ->when($type !== null, function ($query) use ($type) {
                 $query->where('type', $type);
@@ -146,7 +147,10 @@ class Tag extends Model implements Sortable
 
     public static function getTypes(): Collection
     {
-        return static::groupBy('type')->pluck('type');
+        return static::query()
+            ->orderBy('type')
+            ->groupBy('type')
+            ->pluck('type');
     }
 
     public function setAttribute($key, $value)
@@ -160,7 +164,7 @@ class Tag extends Model implements Sortable
 
     public function getAttributeValue($key)
     {
-        if (!in_array($key, $this->translatable)) {
+        if (! in_array($key, $this->translatable)) {
             return parent::getAttributeValue($key);
         }
 

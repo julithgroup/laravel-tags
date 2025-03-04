@@ -8,7 +8,7 @@ class TestCustomTagStaticLocaleModel extends Tag
 {
     public $table = 'custom_tags_static_locale';
 
-    public static function getLocale()
+    public static function getLocale(): string
     {
         return 'en';
     }

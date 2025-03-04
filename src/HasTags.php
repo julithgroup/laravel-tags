@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphPivot;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 
 trait HasTags
@@ -118,7 +119,7 @@ trait HasTags
             });
         });
 
-        return $query;
+        return $query->orderBy('name', 'asc');
     }
 
     public function scopeWithAnyTags(
@@ -131,9 +132,9 @@ trait HasTags
         return $query
             ->whereHas('tags', function (Builder $query) use ($tags) {
                 $tagIds = collect($tags)->pluck('id');
-
                 $query->whereIn(self::getTagTablePrimaryKeyName(), $tagIds);
-            });
+            })
+            ->orderBy('id');
     }
 
     public function scopeWithoutTags(
@@ -146,9 +147,9 @@ trait HasTags
         return $query
             ->whereDoesntHave('tags', function (Builder $query) use ($tags) {
                 $tagIds = collect($tags)->pluck('id');
-
                 $query->whereIn(self::getTagTablePrimaryKeyName(), $tagIds);
-            });
+            })
+            ->orderBy('name');
     }
 
     public function scopeWithAllTagsOfAnyType(Builder $query, $tags): Builder
@@ -172,10 +173,11 @@ trait HasTags
 
         $tagIds = collect($tags)->pluck('id');
 
-        return $query->whereHas(
-            'tags',
-            fn (Builder $query) => $query->whereIn(self::getTagTablePrimaryKeyName(), $tagIds)
-        );
+        return $query
+            ->whereHas('tags', function (Builder $query) use ($tagIds) {
+                $query->whereIn(self::getTagTablePrimaryKeyName(), $tagIds);
+            })
+            ->orderBy('id');
     }
 
     public function tagsWithType(?string $type = null): Collection
@@ -185,9 +187,7 @@ trait HasTags
 
     public function attachTags(array | ArrayAccess | Tag $tags, ?string $type = null): static
     {
-        $className = static::getTagClassName();
-
-        $tags = collect($className::findOrCreate($tags, $type));
+        $tags = static::findOrCreateTags($tags, $type);
 
         $this->tags()->syncWithoutDetaching($tags->pluck('id')->toArray());
 
@@ -210,9 +210,42 @@ trait HasTags
         return $this;
     }
 
-    public function detachTag(string | Tag $tag, string | null $type = null): static
+    public function detachTag(string $name, ?string $type = null, ?string $locale = null): static
     {
-        return $this->detachTags([$tag], $type);
+        $locale = $locale ?? Tag::getLocale();
+
+        // Find the specific tag using the same logic as convertToTags
+        $className = static::getTagClassName();
+        $tag = $className::query()
+            ->where(function ($query) use ($name, $locale) {
+                if (DB::getDriverName() === 'pgsql') {
+                    $query->whereRaw(
+                        "name->>" . "'$locale' = ?",
+                        [$name]
+                    );
+                } else {
+                    $query->whereRaw(
+                        "json_unquote(json_extract(name, '$.\"" . $locale . "\"')) = ?",
+                        [$name]
+                    );
+                }
+            })
+            ->where(function ($query) use ($type) {
+                if ($type === null) {
+                    $query->whereNull('type');
+                } else {
+                    $query->where('type', $type);
+                }
+            })
+            ->first();
+
+        if ($tag) {
+            $this->tags()->detach($tag->id);
+            $this->unsetRelation('tags');
+            $this->load('tags');
+        }
+
+        return $this;
     }
 
     public function syncTags(string | array | ArrayAccess $tags): static
@@ -257,8 +290,85 @@ trait HasTags
             }
 
             $className = static::getTagClassName();
+            $locale = $locale ?? $className::getLocale();
 
-            return $className::findFromString($value, $type, $locale);
+            // Only find existing tags, don't create new ones
+            return $className::query()
+                ->where(function ($query) use ($value, $locale) {
+                    if (DB::getDriverName() === 'pgsql') {
+                        $query->whereRaw(
+                            "name->>" . "'$locale' = ?",
+                            [$value]
+                        );
+                    } else {
+                        $query->whereRaw(
+                            "json_unquote(json_extract(name, '$.\"" . $locale . "\"')) = ?",
+                            [$value]
+                        );
+                    }
+                })
+                ->where(function ($query) use ($type) {
+                    if ($type === null) {
+                        $query->whereNull('type');
+                    } else {
+                        $query->where('type', $type);
+                    }
+                })
+                ->first();
+        })->filter();
+    }
+
+    protected static function findOrCreateTags($values, $type = null, $locale = null)
+    {
+        if ($values instanceof Tag) {
+            $values = [$values];
+        }
+
+        return collect($values)->map(function ($value) use ($type, $locale) {
+            if ($value instanceof Tag) {
+                if (isset($type) && $value->type != $type) {
+                    throw new InvalidArgumentException("Type was set to {$type} but tag is of type {$value->type}");
+                }
+
+                return $value;
+            }
+
+            $className = static::getTagClassName();
+            $locale = $locale ?? $className::getLocale();
+
+            // First try to find an existing tag
+            $tag = $className::query()
+                ->where(function ($query) use ($value, $locale) {
+                    if (DB::getDriverName() === 'pgsql') {
+                        $query->whereRaw(
+                            "name->>" . "'$locale' = ?",
+                            [$value]
+                        );
+                    } else {
+                        $query->whereRaw(
+                            "json_unquote(json_extract(name, '$.\"" . $locale . "\"')) = ?",
+                            [$value]
+                        );
+                    }
+                })
+                ->where(function ($query) use ($type) {
+                    if ($type === null) {
+                        $query->whereNull('type');
+                    } else {
+                        $query->where('type', $type);
+                    }
+                })
+                ->first();
+
+            // If no tag exists with this name and type, create a new one
+            if (! $tag) {
+                $tag = $className::create([
+                    'name' => [$locale => $value],
+                    'type' => $type,
+                ]);
+            }
+
+            return $tag;
         });
     }
 
@@ -271,8 +381,27 @@ trait HasTags
 
             $className = static::getTagClassName();
 
-            return $className::findFromStringOfAnyType($value, $locale);
-        })->flatten();
+            // Try to find the tag with any type first
+            $tag = $className::query()
+                ->where(function ($query) use ($value, $locale, $className) {
+                    $locale = $locale ?? $className::getLocale();
+
+                    if (DB::getDriverName() === 'pgsql') {
+                        $query->whereRaw(
+                            "name->>" . "'$locale' = ?",
+                            [$value]
+                        );
+                    } else {
+                        $query->whereRaw(
+                            "json_unquote(json_extract(name, '$.\"" . $locale . "\"')) = ?",
+                            [$value]
+                        );
+                    }
+                })
+                ->get();
+
+            return $tag;
+        })->flatten()->filter();
     }
 
     protected function syncTagIds($ids, string | null $type = null, $detaching = true): void
